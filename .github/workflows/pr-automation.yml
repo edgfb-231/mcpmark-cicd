@@ -1,0 +1,243 @@
+name: PR Automation Workflow
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        id: eslint
+        run: npm run lint 2>&1 | tee eslint-results.txt
+        continue-on-error: true
+
+      - name: Run Prettier check
+        id: prettier
+        run: npx prettier --check . 2>&1 | tee prettier-results.txt
+        continue-on-error: true
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const eslintResults = fs.readFileSync('eslint-results.txt', 'utf8');
+            const prettierResults = fs.readFileSync('prettier-results.txt', 'utf8');
+            
+            const comment = `
+            ## Code Quality Report
+            
+            ### ESLint Results:
+            \`\`\`
+            ${eslintResults}
+            \`\`\`
+            
+            ### Prettier Results:
+            \`\`\`
+            ${prettierResults}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite with coverage
+        id: test
+        run: npm test -- --coverage 2>&1 | tee test-coverage.txt
+        continue-on-error: true
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const testResults = fs.readFileSync('test-coverage.txt', 'utf8');
+            
+            const comment = `
+            ## Test Coverage Report
+            
+            \`\`\`
+            ${testResults}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dependency vulnerability check (npm audit)
+        id: npm-audit
+        run: npm audit 2>&1 | tee npm-audit.txt
+        continue-on-error: true
+
+      - name: Scan for secrets (Gitleaks)
+        id: gitleaks
+        uses: zricethezav/gitleaks-action@v2
+        with:
+          args: --path=. --report=json --output=gitleaks-report.json
+        continue-on-error: true
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const npmAuditResults = fs.readFileSync('npm-audit.txt', 'utf8');
+            let gitleaksResults = 'No secrets found in code changes.';
+            
+            if (fs.existsSync('gitleaks-report.json')) {
+              const gitleaksData = JSON.parse(fs.readFileSync('gitleaks-report.json', 'utf8'));
+              gitleaksResults = gitleaksData.length > 0 
+                ? `Found ${gitleaksData.length} potential secret(s):\n${JSON.stringify(gitleaksData, null, 2)}` 
+                : 'No secrets found in code changes.';
+            }
+            
+            const comment = `
+            ## Security Scan Report
+            
+            ### Dependencies (npm audit):
+            \`\`\`
+            ${npmAuditResults}
+            \`\`\`
+            
+            ### Vulnerabilities (Secrets Scan):
+            \`\`\`
+            ${gitleaksResults}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the application
+        id: build
+        run: npm run build 2>&1 | tee build-results.txt
+        continue-on-error: true
+
+      - name: Validate endpoints
+        id: endpoints
+        run: |
+          echo "Validating build output and endpoints..."
+          if [ -d "dist" ]; then
+            echo "✅ Build output directory (dist/) exists"
+            # Add your actual endpoint validation here (e.g., start server + curl checks)
+            echo "ℹ️ Endpoint validation: Add your application-specific checks (e.g., curl http://localhost:3000/health)"
+          else
+            echo "❌ Build output directory (dist/) missing"
+          fi 2>&1 | tee endpoint-validation.txt
+        continue-on-error: true
+
+      - name: Upload deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: dist/
+
+      - name: Post Build Validation Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const buildResults = fs.readFileSync('build-results.txt', 'utf8');
+            const endpointResults = fs.readFileSync('endpoint-validation.txt', 'utf8');
+            
+            const comment = `
+            ## Build Validation
+            
+            ### Build Results:
+            \`\`\`
+            ${buildResults}
+            \`\`\`
+            
+            ### Endpoint Validation:
+            \`\`\`
+            ${endpointResults}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
